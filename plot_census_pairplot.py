@@ -3,11 +3,12 @@
 """绘制四次人口普查省级样本关键特征成对关系图。"""
 
 import argparse
-import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import matplotlib as mpl
 import matplotlib.pyplot as plt
+from matplotlib import font_manager
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -24,6 +25,33 @@ RAW_FILES = {
     2010: "第六次人口普查_初筛总表_重庆并入四川_含迁移流动.xlsx",
     2020: "第七次人口普查_初筛汇总_重庆并入四川_含迁移流动.xlsx",
 }
+
+
+def setup_chinese_font() -> str:
+    """自动设置中文字体，优先使用常见 Windows 中文字体。"""
+    preferred_fonts = ["Microsoft YaHei", "SimHei", "SimSun", "KaiTi"]
+    available_font_names = {f.name for f in font_manager.fontManager.ttflist}
+    selected_font = next((font for font in preferred_fonts if font in available_font_names), None)
+
+    if selected_font is None:
+        print("警告：未找到 Microsoft YaHei / SimHei / SimSun / KaiTi，中文可能无法正常显示。")
+        selected_font = "sans-serif"
+    else:
+        print(f"当前使用中文字体：{selected_font}")
+
+    mpl.rcParams["font.family"] = selected_font
+    mpl.rcParams["font.sans-serif"] = [selected_font]
+    mpl.rcParams["axes.unicode_minus"] = False
+    sns.set_theme(
+        style="white",
+        font=selected_font,
+        rc={
+            "font.family": selected_font,
+            "font.sans-serif": [selected_font],
+            "axes.unicode_minus": False,
+        },
+    )
+    return selected_font
 
 
 def resolve_file_path(file_name: str) -> Optional[Path]:
@@ -161,25 +189,36 @@ def build_features_from_standardized(df: pd.DataFrame) -> Tuple[pd.DataFrame, Di
         derived_logs.append(f"aging_coeff = {mapped['aging_coeff']}")
     else:
         young_col = mapped.get("young_share")
-        old_col = mapped.get("old_share")
-        if young_col and old_col:
+        age65_col = get_first_existing_column(df, ["age_65_plus_share", "65岁及以上占比", "65岁及以上占总人口比", "65岁及以上占总人口比重(%)"])
+        age60_col = get_first_existing_column(df, ["age_60_plus_share", "60岁及以上占比", "60岁及以上占总人口比"])
+        if young_col and (age65_col or age60_col):
             young = normalize_ratio(df[young_col])
-            old = normalize_ratio(df[old_col])
-            # 1990年若只有60岁及以上占比，也可作为四普近似老年人口占比。
+            old_65 = normalize_ratio(df[age65_col]) if age65_col else pd.Series(np.nan, index=df.index)
+            old_60 = normalize_ratio(df[age60_col]) if age60_col else pd.Series(np.nan, index=df.index)
+            old = old_65.where(old_65.notna(), old_60)
             out["aging_coeff"] = old / young.replace(0, np.nan)
             out["young_share"] = young
             out["old_share"] = old
-            derived_logs.append(f"aging_coeff = {old_col} / {young_col}")
+            derived_logs.append(f"aging_coeff = 行级优先({age65_col} -> {age60_col}) / {young_col}")
+            has_1990_age60 = ((out["census_year"] == 1990) & old_65.isna() & old_60.notna()).any()
+            if has_1990_age60:
+                print("1990 年部分样本使用 age_60_plus_share 近似计算老龄化系数。")
 
-    if "net_migration_rate" in mapped:
-        out["net_migration_rate"] = normalize_ratio(df[mapped["net_migration_rate"]])
-        derived_logs.append(f"net_migration_rate = {mapped['net_migration_rate']}")
-    else:
-        in_col = mapped.get("in_migration_share")
-        out_col = mapped.get("out_migration_share")
+    net_col = get_first_existing_column(df, ["net_migration_rate", "net_interprovincial_inflow_rate", "净迁移率", "省际净迁入率"])
+    in_col = mapped.get("in_migration_share")
+    out_col = mapped.get("out_migration_share")
+    if net_col:
+        net_primary = normalize_ratio(df[net_col])
         if in_col and out_col:
-            out["net_migration_rate"] = normalize_ratio(df[in_col]) - normalize_ratio(df[out_col])
-            derived_logs.append(f"net_migration_rate = {in_col} - {out_col}")
+            fallback = normalize_ratio(df[in_col]) - normalize_ratio(df[out_col])
+            out["net_migration_rate"] = net_primary.where(net_primary.notna(), fallback)
+            derived_logs.append(f"net_migration_rate = 行级优先({net_col} -> {in_col} - {out_col})")
+        else:
+            out["net_migration_rate"] = net_primary
+            derived_logs.append(f"net_migration_rate = {net_col}")
+    elif in_col and out_col:
+        out["net_migration_rate"] = normalize_ratio(df[in_col]) - normalize_ratio(df[out_col])
+        derived_logs.append(f"net_migration_rate = {in_col} - {out_col}")
 
     if "illiteracy_rate" in mapped:
         out["illiteracy_rate"] = normalize_ratio(df[mapped["illiteracy_rate"]])
@@ -216,8 +255,10 @@ def build_features_from_standardized(df: pd.DataFrame) -> Tuple[pd.DataFrame, Di
     return out, mapped, unresolved
 
 
-def plot_pairplot(df: pd.DataFrame, mode: str, output_path: str) -> None:
-    basic_vars = ["urbanization_rate", "higher_edu_share", "aging_coeff", "net_migration_rate"]
+def plot_pairplot(df: pd.DataFrame, mode: str, output_path: str, selected_font_name: str, include_migration: bool) -> None:
+    basic_vars = ["urbanization_rate", "higher_edu_share", "aging_coeff"]
+    if include_migration:
+        basic_vars.append("net_migration_rate")
     extended_vars = basic_vars + ["log_total_population", "illiteracy_rate"]
     vars_to_plot = basic_vars if mode == "basic" else extended_vars
 
@@ -243,38 +284,92 @@ def plot_pairplot(df: pd.DataFrame, mode: str, output_path: str) -> None:
         "illiteracy_rate": "文盲率",
     }
 
-    plot_df = df[["census_year", *vars_to_plot]].dropna().copy()
+    pre_df = df[["census_year", *vars_to_plot]].copy()
+    print("绘图变量：")
+    cn_names = {
+        "urbanization_rate": "城市化率",
+        "higher_edu_share": "高等教育占比",
+        "aging_coeff": "老龄化系数",
+        "net_migration_rate": "净迁移率",
+    }
+    print(" / ".join(cn_names.get(v, label_map.get(v, v)) for v in vars_to_plot))
+    print("dropna 前样本量：")
+    pre_counts = pre_df["census_year"].value_counts().to_dict()
+    for y in TARGET_YEARS:
+        print(f"{y}: {int(pre_counts.get(y, 0))}")
+
+    plot_df = pre_df.dropna().copy()
     if plot_df.empty:
         raise ValueError("绘图数据为空：请检查字段缺失或筛选条件。")
-    print(f"绘图样本量：{len(plot_df)}")
-    print("各年份样本量：")
+    print("dropna 后样本量：")
     year_counts = plot_df["census_year"].value_counts().to_dict()
     for y in TARGET_YEARS:
         print(f"{y}: {int(year_counts.get(y, 0))}")
+    if int(year_counts.get(1990, 0)) == 0:
+        missing_1990 = pre_df[pre_df["census_year"] == 1990]
+        if not missing_1990.empty:
+            miss_by_var = missing_1990[vars_to_plot].isna().sum().sort_values(ascending=False)
+            top_var = miss_by_var.index[0]
+            print(f"提示：1990 年缺失最多的变量是 {top_var}（缺失 {int(miss_by_var.iloc[0])} 条）。")
+    if include_migration and int(year_counts.get(1990, 0)) == 0:
+        print("警告：加入净迁移率后，1990 年样本被全部删除。建议不使用 --include-migration 以保留四普样本。")
 
     plot_df = plot_df.rename(columns={k: v for k, v in label_map.items() if k in plot_df.columns})
     plot_vars_cn = [label_map[v] for v in vars_to_plot]
     plot_df["census_year"] = plot_df["census_year"].astype(int).astype(str)
 
-    sns.set_theme(style="white", context="notebook")
-    palette = {"1990": "#6BAED6", "2000": "#FDAE6B", "2010": "#74C476", "2020": "#C994C7"}
+    plt.rcParams["font.family"] = selected_font_name
+    plt.rcParams["font.sans-serif"] = [selected_font_name]
+    plt.rcParams["axes.unicode_minus"] = False
+    palette = {"1990": "#F2C8C4", "2000": "#E9A0A7", "2010": "#B5658F", "2020": "#2B1B3F"}
+    used_years = sorted(plot_df["census_year"].unique().tolist())
+    palette_used = {year: palette[year] for year in used_years if year in palette}
 
-    g = sns.pairplot(
-        plot_df,
-        vars=plot_vars_cn,
-        hue="census_year",
-        palette=palette,
-        diag_kind="kde",
-        height=2.9,
-        plot_kws={"s": 45, "alpha": 0.75, "edgecolor": "white", "linewidth": 0.7},
-    )
+    try:
+        g = sns.pairplot(
+            plot_df,
+            vars=plot_vars_cn,
+            hue="census_year",
+            palette=palette_used,
+            diag_kind="kde",
+            height=3.2,
+            plot_kws={"s": 38, "alpha": 0.78, "edgecolor": "white", "linewidth": 0.4},
+            diag_kws={"fill": True, "alpha": 0.35},
+        )
+    except Exception:
+        g = sns.pairplot(
+            plot_df,
+            vars=plot_vars_cn,
+            hue="census_year",
+            palette=palette_used,
+            diag_kind="hist",
+            height=3.2,
+            plot_kws={"s": 38, "alpha": 0.78, "edgecolor": "white", "linewidth": 0.4},
+            diag_kws={"alpha": 0.5},
+        )
+
+    for ax in g.axes.flatten():
+        if ax is None:
+            continue
+        ax.title.set_fontname(selected_font_name)
+        ax.xaxis.label.set_fontname(selected_font_name)
+        ax.yaxis.label.set_fontname(selected_font_name)
+        for label in ax.get_xticklabels():
+            label.set_fontname(selected_font_name)
+        for label in ax.get_yticklabels():
+            label.set_fontname(selected_font_name)
+        sns.despine(ax=ax, top=True, right=True, left=False, bottom=False)
+        ax.grid(False)
 
     if g._legend is not None:
         g._legend.set_title("普查年份")
+        g._legend.get_title().set_fontname(selected_font_name)
+        for t in g._legend.texts:
+            t.set_fontname(selected_font_name)
 
     g.fig.subplots_adjust(top=0.90)
-    g.fig.suptitle("四次人口普查关键特征成对关系图", fontsize=15)
-    g.fig.text(0.5, 0.965, "基于四普（1990）、五普（2000）、六普（2010）、七普（2020）省级样本", ha="center", fontsize=11)
+    g.fig.suptitle("四次人口普查关键特征成对关系图", fontsize=18, fontweight="bold", fontname=selected_font_name, y=1.03)
+    g.fig.text(0.5, 1.00, "基于四普（1990）、五普（2000）、六普（2010）、七普（2020）省级样本", ha="center", fontsize=12, fontname=selected_font_name)
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -287,7 +382,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="绘制人口普查多变量成对关系图")
     parser.add_argument("--file", default=STANDARDIZED_FILE, help="标准化Excel文件路径")
     parser.add_argument("--sheet", default=DEFAULT_SHEET, help="工作表名称")
-    parser.add_argument("--mode", choices=["basic", "extended"], default="basic", help="basic=4变量，extended=6变量")
+    parser.add_argument("--mode", choices=["basic", "extended"], default="basic", help="basic=3或4变量，extended=5或6变量")
+    parser.add_argument("--include-migration", action="store_true", help="在 basic 模式加入净迁移率变量")
     parser.add_argument("--output", default="outputs/census_pairplot_key_features.png", help="输出图像路径")
     args = parser.parse_args()
 
@@ -300,9 +396,16 @@ def main() -> None:
         return
 
     try:
+        selected_font = setup_chinese_font()
         raw_df = load_standardized_data(resolved, args.sheet)
         feature_df, _, _ = build_features_from_standardized(raw_df)
-        plot_pairplot(feature_df, mode=args.mode, output_path=args.output)
+        if args.output == "outputs/census_pairplot_key_features.png":
+            args.output = (
+                "outputs/census_pairplot_key_features_with_migration.png"
+                if args.include_migration
+                else "outputs/census_pairplot_key_features_no_migration.png"
+            )
+        plot_pairplot(feature_df, mode=args.mode, output_path=args.output, selected_font_name=selected_font, include_migration=args.include_migration)
     except Exception as exc:
         print(f"运行失败：{exc}")
 
