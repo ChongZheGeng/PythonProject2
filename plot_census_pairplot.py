@@ -83,15 +83,15 @@ def _col_candidates() -> Dict[str, List[str]]:
         "urbanization_rate": ["urban_rate", "urbanization_rate", "城镇化率"],
         "city_share": ["city_share", "市占比", "市占总人口比", "市人口占总人口比重(%)", "市占总人口比重", "市人口占比"],
         "town_share": ["town_share", "镇占比", "镇占总人口比", "镇人口占总人口比重(%)", "镇占总人口比重", "镇人口占比"],
-        "higher_edu_share": ["higher_edu_share", "higher_education_share", "高等教育占比"],
+        "higher_edu_share": ["higher_edu_share", "higher_education_share", "college_junior_share", "bachelor_share", "graduate_share", "大学专科占比", "大学本科占比", "研究生占比", "高等教育占比"],
         "young_share": ["age_0_14_share", "0-14岁占比", "0-14岁占总人口比", "0-14岁占总人口比重(%)"],
         "old_share": [
             "age_65_plus_share", "age_60_plus_share", "65岁及以上占比", "65岁及以上占总人口比", "65岁及以上占总人口比重(%)", "60岁及以上占比", "60岁及以上占总人口比"
         ],
         "aging_coeff": ["aging_coeff", "老龄化系数"],
-        "net_migration_rate": ["net_migration_rate", "净迁移率", "省际净迁入率"],
-        "in_migration_share": ["in_migration_share", "cross_province_in_share", "跨省迁入占总人口比例", "跨省迁入占总人口比", "跨省迁入占总人口比重(%)", "跨省流入占总人口比"],
-        "out_migration_share": ["out_migration_share", "cross_province_out_share", "跨省迁出占总人口比例", "跨省迁出占总人口比", "跨省迁出占总人口比重(%)", "跨省流出占总人口比"],
+        "net_migration_rate": ["net_migration_rate", "net_interprovincial_inflow_rate", "净迁移率", "省际净迁入率"],
+        "in_migration_share": ["interprovincial_inflow_share", "in_migration_share", "cross_province_in_share", "跨省迁入占总人口比例", "跨省迁入占总人口比", "跨省迁入占总人口比重(%)", "跨省流入占总人口比"],
+        "out_migration_share": ["interprovincial_outflow_share", "out_migration_share", "cross_province_out_share", "跨省迁出占总人口比例", "跨省迁出占总人口比", "跨省迁出占总人口比重(%)", "跨省流出占总人口比"],
         "illiteracy_rate": ["illiteracy_rate", "文盲率", "文盲人口占15岁及以上人口比", "文盲人口占15岁及以上人口比重(%)"],
     }
 
@@ -109,6 +109,7 @@ def build_features_from_standardized(df: pd.DataFrame) -> Tuple[pd.DataFrame, Di
             missing[k] = names
 
     out = pd.DataFrame(index=df.index)
+    derived_logs: List[str] = []
 
     for req in ["census_year", "region"]:
         if req not in mapped:
@@ -131,20 +132,33 @@ def build_features_from_standardized(df: pd.DataFrame) -> Tuple[pd.DataFrame, Di
             out["urbanization_rate"] = normalize_ratio(df[city_col]) + normalize_ratio(df[town_col])
 
     if "higher_edu_share" in mapped:
-        out["higher_edu_share"] = normalize_ratio(df[mapped["higher_edu_share"]])
+        col = mapped["higher_edu_share"]
+        if col in {"college_junior_share", "bachelor_share", "graduate_share", "大学专科占比", "大学本科占比", "研究生占比"}:
+            mapped.pop("higher_edu_share", None)
+        else:
+            out["higher_edu_share"] = normalize_ratio(df[col])
+            derived_logs.append(f"higher_edu_share = {col}")
+    if "higher_edu_share" not in out.columns:
+        college_col = get_first_existing_column(df, ["college_junior_share", "大学专科占比"])
+        bachelor_col = get_first_existing_column(df, ["bachelor_share", "大学本科占比"])
+        graduate_col = get_first_existing_column(df, ["graduate_share", "研究生占比"])
+        if college_col and bachelor_col:
+            college = normalize_ratio(df[college_col]).fillna(0)
+            bachelor = normalize_ratio(df[bachelor_col]).fillna(0)
+            graduate = normalize_ratio(df[graduate_col]).fillna(0) if graduate_col else 0
+            out["higher_edu_share"] = college + bachelor + graduate
+            expr = f"higher_edu_share = {college_col} + {bachelor_col}"
+            if graduate_col:
+                expr += f" + {graduate_col}"
+            else:
+                expr += " + 0(graduate_share缺失)"
+            derived_logs.append(expr)
     else:
-        edu_candidates = [
-            "college_share", "bachelor_share", "graduate_share", "master_share", "doctor_share",
-            "大学专科占比", "大学本科占比", "研究生占比", "硕士研究生占比", "博士研究生占比",
-            "大学专科占6岁及以上人口比", "大学本科占6岁及以上人口比", "研究生占6岁及以上人口比",
-            "大学专科占3岁及以上人口比", "大学本科占3岁及以上人口比", "硕士研究生占3岁及以上人口比", "博士研究生占3岁及以上人口比",
-        ]
-        existing = [c for c in edu_candidates if c in df.columns]
-        if existing:
-            out["higher_edu_share"] = sum(normalize_ratio(df[c]) for c in existing)
+        pass
 
     if "aging_coeff" in mapped:
         out["aging_coeff"] = pd.to_numeric(df[mapped["aging_coeff"]], errors="coerce")
+        derived_logs.append(f"aging_coeff = {mapped['aging_coeff']}")
     else:
         young_col = mapped.get("young_share")
         old_col = mapped.get("old_share")
@@ -155,14 +169,17 @@ def build_features_from_standardized(df: pd.DataFrame) -> Tuple[pd.DataFrame, Di
             out["aging_coeff"] = old / young.replace(0, np.nan)
             out["young_share"] = young
             out["old_share"] = old
+            derived_logs.append(f"aging_coeff = {old_col} / {young_col}")
 
     if "net_migration_rate" in mapped:
         out["net_migration_rate"] = normalize_ratio(df[mapped["net_migration_rate"]])
+        derived_logs.append(f"net_migration_rate = {mapped['net_migration_rate']}")
     else:
         in_col = mapped.get("in_migration_share")
         out_col = mapped.get("out_migration_share")
         if in_col and out_col:
             out["net_migration_rate"] = normalize_ratio(df[in_col]) - normalize_ratio(df[out_col])
+            derived_logs.append(f"net_migration_rate = {in_col} - {out_col}")
 
     if "illiteracy_rate" in mapped:
         out["illiteracy_rate"] = normalize_ratio(df[mapped["illiteracy_rate"]])
@@ -187,6 +204,12 @@ def build_features_from_standardized(df: pd.DataFrame) -> Tuple[pd.DataFrame, Di
     if unresolved:
         for k, v in unresolved.items():
             print(f"  {k}: 候选={v}")
+    else:
+        print("  无")
+    print("成功生成的派生变量：")
+    if derived_logs:
+        for item in derived_logs:
+            print(f"  {item}")
     else:
         print("  无")
 
@@ -223,6 +246,11 @@ def plot_pairplot(df: pd.DataFrame, mode: str, output_path: str) -> None:
     plot_df = df[["census_year", *vars_to_plot]].dropna().copy()
     if plot_df.empty:
         raise ValueError("绘图数据为空：请检查字段缺失或筛选条件。")
+    print(f"绘图样本量：{len(plot_df)}")
+    print("各年份样本量：")
+    year_counts = plot_df["census_year"].value_counts().to_dict()
+    for y in TARGET_YEARS:
+        print(f"{y}: {int(year_counts.get(y, 0))}")
 
     plot_df = plot_df.rename(columns={k: v for k, v in label_map.items() if k in plot_df.columns})
     plot_vars_cn = [label_map[v] for v in vars_to_plot]
@@ -276,8 +304,7 @@ def main() -> None:
         feature_df, _, _ = build_features_from_standardized(raw_df)
         plot_pairplot(feature_df, mode=args.mode, output_path=args.output)
     except Exception as exc:
-        print(f"标准化文件不可用：{exc}")
-        print("提示：仅当标准化文件完全不可用时，才建议手动启用原始四普/五普/六普/七普文件回退流程。")
+        print(f"运行失败：{exc}")
 
 
 if __name__ == "__main__":
