@@ -20,8 +20,12 @@ from typing import Dict, List, Tuple
 import pandas as pd
 from pyecharts import options as opts
 from pyecharts.charts import Map
+from pyecharts.globals import CurrentConfig
 from pyecharts.render import make_snapshot
 from snapshot_selenium import snapshot
+
+# 使用稳定可访问的 pyecharts 静态资源地址
+CurrentConfig.ONLINE_HOST = "https://assets.pyecharts.org/assets/v5/"
 
 
 # =========================
@@ -29,8 +33,8 @@ from snapshot_selenium import snapshot
 # =========================
 INPUT_FILENAME = "省份聚类结果_K4.xlsx"
 BASE_DIR = Path(__file__).resolve().parent
+OUTPUT_HTML = BASE_DIR / "图3-1_省份聚类类型空间分布图.html"
 OUTPUT_PNG = BASE_DIR / "图3-1_省份聚类类型空间分布图.png"
-TEMP_HTML = BASE_DIR / "_tmp_cluster_map.html"
 
 TITLE = "图3-1 省份聚类类型空间分布图"
 SUBTITLE = "（按省级行政区聚类结果着色）"
@@ -181,7 +185,7 @@ def detect_columns(df: pd.DataFrame) -> Tuple[str, str]:
 
 
 def main() -> None:
-    input_excel, attempted_paths = find_input_excel()
+    input_excel, _attempted_paths = find_input_excel()
     print(f"使用输入文件：{input_excel.resolve()}")
 
     df = pd.read_excel(input_excel)
@@ -304,16 +308,26 @@ def main() -> None:
         )
     )
 
-    c.render(str(TEMP_HTML))
+    # 始终先输出 HTML，保证至少可交付可视化结果
+    html_path = c.render(str(OUTPUT_HTML))
+    print(f"HTML 文件已保存：{OUTPUT_HTML.resolve()}")
 
-    # 导出高分辨率 PNG：通过 pixel_ratio 提高等效 dpi（近似论文 300dpi 输出需求）
-    make_snapshot(snapshot, c.render(), str(OUTPUT_PNG), is_remove_html=True, pixel_ratio=3)
-
-    # 若 html 未删除，手工删除临时文件
-    if TEMP_HTML.exists():
-        TEMP_HTML.unlink(missing_ok=True)
-
-    print(f"绘图完成，已保存：{OUTPUT_PNG.resolve()}")
+    # 导出高分辨率 PNG：增加延迟，避免 ECharts JS 尚未加载完成
+    try:
+        make_snapshot(
+            snapshot,
+            html_path,
+            str(OUTPUT_PNG),
+            is_remove_html=False,
+            pixel_ratio=3,
+            delay=5,
+        )
+        print(f"PNG 图片已保存：{OUTPUT_PNG.resolve()}")
+    except Exception as e:
+        print("PNG 导出失败，原因可能是 ECharts JS 文件未加载成功。")
+        print(f"错误信息：{e}")
+        print(f"已保留 HTML 文件：{OUTPUT_HTML.resolve()}")
+        print("请用浏览器打开该 HTML 文件后手动截图，或检查网络是否能访问 https://assets.pyecharts.org/assets/v5/")
 
 
 if __name__ == "__main__":
