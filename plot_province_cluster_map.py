@@ -1,8 +1,8 @@
 """
 绘制图3-1 省份聚类类型空间分布图（Geopandas + Matplotlib 静态版）
 
-依赖安装（按需）：
-    pip install pandas openpyxl geopandas matplotlib
+运行前可安装依赖：
+pip install pandas openpyxl geopandas matplotlib requests
 """
 
 from __future__ import annotations
@@ -16,13 +16,20 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import pandas as pd
 
+try:
+    import requests
+except ImportError as exc:
+    raise ImportError("缺少 requests 依赖，请先安装：pip install requests") from exc
+
 
 # =========================
 # 基本配置
 # =========================
 INPUT_FILENAME = "省份聚类结果_K4.xlsx"
 BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
 OUTPUT_PNG = BASE_DIR / "图3-1_省份聚类类型空间分布图.png"
+BOUNDARY_GEOJSON = DATA_DIR / "china_provinces.geojson"
 
 TITLE = "图3-1 省份聚类类型空间分布图"
 
@@ -43,6 +50,11 @@ CATEGORY_COLORS: Dict[int, str] = {
 
 DEFAULT_FILL = "#E6E6E6"  # 未赋类省份（如港澳台缺失时）
 EDGE_COLOR = "#666666"
+
+GEOJSON_URLS = [
+    "https://geo.datav.aliyun.com/areas_v3/bound/100000_full.json",
+    "https://geo.datav.aliyun.com/areas_v3/bound/100000.json",
+]
 
 
 # =========================
@@ -73,28 +85,66 @@ def find_input_excel() -> Tuple[Path, List[Path]]:
     raise FileNotFoundError("\n".join(msg_lines))
 
 
+def download_china_boundary_geojson(target_file: Path) -> Tuple[bool, List[str]]:
+    """自动下载中国省级 GeoJSON。"""
+    errors: List[str] = []
+
+    DATA_DIR.mkdir(exist_ok=True)
+
+    for url in GEOJSON_URLS:
+        try:
+            print(f"尝试下载地图边界：{url}")
+            resp = requests.get(url, timeout=20)
+            resp.raise_for_status()
+            target_file.write_bytes(resp.content)
+            print(f"下载成功：{target_file.resolve()}")
+            return True, errors
+        except Exception as exc:  # noqa: BLE001
+            err = f"{url} -> {type(exc).__name__}: {exc}"
+            errors.append(err)
+            print(f"下载失败：{err}")
+
+    return False, errors
+
+
 def find_china_boundary_file() -> Tuple[Path, List[Path]]:
-    """按要求优先顺序查找中国省级边界文件。"""
+    """按要求优先顺序查找中国省级边界文件；缺失时自动下载 GeoJSON。"""
+    DATA_DIR.mkdir(exist_ok=True)
+
     candidates = [
         Path("D:/PythonProject2/china_provinces.geojson"),
         Path("D:/PythonProject2/data/china_provinces.geojson"),
         Path("D:/PythonProject2/china_provinces.shp"),
         Path("D:/PythonProject2/data/china_provinces.shp"),
+        BASE_DIR / "china_provinces.geojson",
+        BOUNDARY_GEOJSON,
+        BASE_DIR / "china_provinces.shp",
+        DATA_DIR / "china_provinces.shp",
     ]
 
     for p in candidates:
         if p.exists() and p.is_file():
             return p, candidates
 
+    ok, download_errors = download_china_boundary_geojson(BOUNDARY_GEOJSON)
+    if ok and BOUNDARY_GEOJSON.exists():
+        return BOUNDARY_GEOJSON, candidates
+
     msg_lines = [
-        "未找到中国省级行政区边界文件（GeoJSON / Shapefile）。",
-        f"当前工作目录：{Path.cwd()}",
-        f"脚本所在目录：{BASE_DIR}",
-        "已尝试以下地图文件路径：",
+        "未找到本地中国省级行政区边界文件，且自动下载失败。",
+        "请手动下载中国省级行政区 GeoJSON 文件，并命名为 china_provinces.geojson，",
+        "放到以下任一位置：",
+        "1. D:\\PythonProject2\\china_provinces.geojson",
+        "2. D:\\PythonProject2\\data\\china_provinces.geojson",
+        "",
+        "下载失败原因：",
     ]
-    for idx, p in enumerate(candidates, start=1):
-        msg_lines.append(f"{idx}. {p}")
-    msg_lines.append("请下载并放入中国省级行政区 GeoJSON（推荐文件名 china_provinces.geojson）后重试。")
+    if download_errors:
+        for i, err in enumerate(download_errors, start=1):
+            msg_lines.append(f"{i}. {err}")
+    else:
+        msg_lines.append("1. 未获取到具体异常信息。")
+
     raise FileNotFoundError("\n".join(msg_lines))
 
 
@@ -102,12 +152,7 @@ def find_china_boundary_file() -> Tuple[Path, List[Path]]:
 # 名称标准化
 # =========================
 def normalize_province_name(raw_name: str) -> List[str]:
-    """将原始省份名称标准化为统一名称。
-
-    返回 list 的原因：
-    - 常规情况返回单一省份；
-    - 特殊情况“四川（含重庆）”会拆分为“四川”“重庆”。
-    """
+    """将原始省份名称标准化为统一名称。"""
     if pd.isna(raw_name):
         return []
 
@@ -118,8 +163,6 @@ def normalize_province_name(raw_name: str) -> List[str]:
     name = re.sub(r"[\s\u3000]+", "", name)
 
     if re.search(r"四川.*含.*重庆", name):
-        # 由于第四次人口普查时期重庆尚未单列，为保证空间分布图完整，
-        # 因此在可视化中将四川和重庆赋为同一类别。
         return ["四川", "重庆"]
 
     direct_map = {
@@ -128,11 +171,35 @@ def normalize_province_name(raw_name: str) -> List[str]:
         "上海市": "上海",
         "重庆市": "重庆",
         "河北省": "河北",
+        "山西省": "山西",
+        "辽宁省": "辽宁",
+        "吉林省": "吉林",
+        "黑龙江省": "黑龙江",
+        "江苏省": "江苏",
+        "浙江省": "浙江",
+        "安徽省": "安徽",
+        "福建省": "福建",
+        "江西省": "江西",
+        "山东省": "山东",
+        "河南省": "河南",
+        "湖北省": "湖北",
+        "湖南省": "湖南",
+        "广东省": "广东",
+        "海南省": "海南",
+        "四川省": "四川",
+        "贵州省": "贵州",
+        "云南省": "云南",
+        "陕西省": "陕西",
+        "甘肃省": "甘肃",
+        "青海省": "青海",
+        "台湾省": "台湾",
         "内蒙古自治区": "内蒙古",
         "广西壮族自治区": "广西",
         "宁夏回族自治区": "宁夏",
         "新疆维吾尔自治区": "新疆",
         "西藏自治区": "西藏",
+        "香港特别行政区": "香港",
+        "澳门特别行政区": "澳门",
     }
     if name in direct_map:
         return [direct_map[name]]
@@ -145,6 +212,9 @@ def normalize_province_name(raw_name: str) -> List[str]:
         .replace("回族自治区", "")
         .replace("维吾尔自治区", "")
         .replace("自治区", "")
+        .replace("壮族", "")
+        .replace("回族", "")
+        .replace("维吾尔", "")
     )
 
     alias_map = {
@@ -162,7 +232,6 @@ def normalize_province_name(raw_name: str) -> List[str]:
 
 
 def detect_columns(df: pd.DataFrame) -> Tuple[str, str]:
-    """自动识别“省份列”和“类别列”。"""
     col_names = list(df.columns)
     province_keywords = ["省", "市", "地区", "行政区", "province", "prov", "区域", "省份"]
     category_keywords = ["类", "类别", "cluster", "聚类", "type", "分组"]
@@ -200,16 +269,33 @@ def detect_columns(df: pd.DataFrame) -> Tuple[str, str]:
 
 def detect_geo_province_column(gdf: gpd.GeoDataFrame) -> str:
     """自动识别边界文件中的省名字段。"""
-    candidates = ["省份", "省", "NAME", "NAME_CHN", "name", "name_zh", "prov_name", "province"]
     cols = list(gdf.columns)
+    preferred = ["name", "NAME", "省", "省份", "fullname"]
 
-    for c in candidates:
+    for c in preferred:
         if c in cols:
             return c
 
+    candidates = []
     for c in cols:
-        if "name" in str(c).lower() or "省" in str(c):
-            return c
+        lc = str(c).lower()
+        score = 0
+        if lc in {"name", "fullname"}:
+            score += 5
+        if "name" in lc:
+            score += 3
+        if "full" in lc:
+            score += 2
+        if "省" in str(c) or "市" in str(c):
+            score += 3
+        if "prov" in lc:
+            score += 3
+        if score > 0:
+            candidates.append((score, c))
+
+    if candidates:
+        candidates.sort(reverse=True)
+        return candidates[0][1]
 
     raise ValueError(f"无法识别边界文件中的省份名称字段，当前字段为：{cols}")
 
@@ -262,12 +348,17 @@ def main() -> None:
 
     gdf = gpd.read_file(boundary_file)
     name_col = detect_geo_province_column(gdf)
+    print(f"识别到地图省份名称字段：{name_col}")
     gdf["省份标准化"] = gdf[name_col].apply(lambda x: normalize_province_name(x)[0] if normalize_province_name(x) else None)
 
     merged = gdf.merge(clean_df, left_on="省份标准化", right_on="省份", how="left")
     merged["填充色"] = merged["类别"].map(CATEGORY_COLORS).fillna(DEFAULT_FILL)
 
-    missing_special = [p for p in ["香港", "澳门", "台湾"] if p in set(merged["省份标准化"].dropna()) and p not in set(clean_df["省份"])]
+    missing_special = [
+        p
+        for p in ["香港", "澳门", "台湾"]
+        if p in set(merged["省份标准化"].dropna()) and p not in set(clean_df["省份"])
+    ]
     if missing_special:
         print(f"[提示] {missing_special} 在 Excel 中无类别，已使用浅灰色显示。")
 
