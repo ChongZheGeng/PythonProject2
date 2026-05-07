@@ -72,100 +72,94 @@ def normalize_ratio(series: pd.Series) -> pd.Series:
 def build_feature_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=df.index)
 
-    # 年份
-    year_col = get_first_existing_column(df, ["year", "年份", "普查年份"])
+    year_candidates = ["census_year", "year", "普查年份", "年份"]
+    year_col = get_first_existing_column(df, year_candidates)
     if year_col is None:
-        raise ValueError("缺少年份字段（候选：year, 年份, 普查年份）")
-    out["year"] = pd.to_numeric(df[year_col], errors="coerce")
+        raise ValueError(
+            "错误：缺少年份字段。\n"
+            f"当前字段包括：\n{', '.join(map(str, df.columns))}\n"
+            "期望字段之一：\n"
+            "census_year, year, 普查年份, 年份"
+        )
+    out["census_year"] = pd.to_numeric(df[year_col], errors="coerce").astype("Int64")
 
-    # 地区名称（用于排除全国/合计）
-    region_col = get_first_existing_column(df, ["region", "province", "地区", "省份", "省级行政区"])
+    census_round_col = get_first_existing_column(df, ["census_round", "census", "普查轮次", "普查"])
+    if census_round_col is not None:
+        out["census_round"] = df[census_round_col]
+
+    region_col = get_first_existing_column(df, ["region_short", "region", "地区", "地区简称", "original_region_name"])
     if region_col is not None:
-        out["region_name"] = df[region_col].astype(str)
+        out["region"] = df[region_col].astype(str)
     else:
-        out["region_name"] = ""
+        out["region"] = ""
 
-    if "region_type" in df.columns:
-        out["region_type"] = df["region_type"].astype(str)
-    else:
-        out["region_type"] = ""
+    region_type_col = get_first_existing_column(df, ["region_type", "地区类型", "地区层级"])
+    if region_type_col is not None:
+        out["region_type"] = df[region_type_col].astype(str)
 
-    # 1) 总人口
     col = get_first_existing_column(df, ["total_pop", "total_population", "总人口"])
     out["total_population"] = pd.to_numeric(df[col], errors="coerce") if col else pd.NA
 
-    # 2) 城镇化率
     col = get_first_existing_column(df, ["urban_rate", "urbanization_rate", "城镇化率"])
     if col:
         out["urbanization_rate"] = df[col]
     else:
-        city_col = get_first_existing_column(df, ["city_share", "市占比", "市占总人口比"])
-        town_col = get_first_existing_column(df, ["town_share", "镇占比", "镇占总人口比"])
+        city_col = get_first_existing_column(df, ["city_share"])
+        town_col = get_first_existing_column(df, ["town_share"])
         if city_col and town_col:
             out["urbanization_rate"] = pd.to_numeric(df[city_col], errors="coerce") + pd.to_numeric(df[town_col], errors="coerce")
         else:
             out["urbanization_rate"] = pd.NA
 
-    # 3) 高等教育占比
     higher_col = get_first_existing_column(df, ["higher_edu_share"])
     if higher_col:
         out["higher_edu_share"] = df[higher_col]
     else:
-        junior_col = get_first_existing_column(df, ["college_junior_share", "大学专科占比", "大学专科占6岁及以上人口比", "大学专科占3岁及以上人口比"])
-        bachelor_col = get_first_existing_column(df, ["bachelor_share", "大学本科占比", "大学本科占6岁及以上人口比", "大学本科占3岁及以上人口比"])
-        graduate_col = get_first_existing_column(df, ["graduate_share", "研究生占比", "研究生占6岁及以上人口比", "硕士研究生占3岁及以上人口比"])
-        phd_col = get_first_existing_column(df, ["博士研究生占3岁及以上人口比"])
-
+        junior_col = get_first_existing_column(df, ["college_junior_share"])
+        bachelor_col = get_first_existing_column(df, ["bachelor_share"])
+        graduate_col = get_first_existing_column(df, ["graduate_share"])
         if junior_col and bachelor_col:
             junior = pd.to_numeric(df[junior_col], errors="coerce")
             bachelor = pd.to_numeric(df[bachelor_col], errors="coerce")
             graduate = pd.to_numeric(df[graduate_col], errors="coerce") if graduate_col else pd.Series(0, index=df.index)
-            phd = pd.to_numeric(df[phd_col], errors="coerce") if phd_col else pd.Series(0, index=df.index)
-            out["higher_edu_share"] = junior + bachelor + graduate.fillna(0) + phd.fillna(0)
+            out["higher_edu_share"] = junior + bachelor + graduate.fillna(0)
         else:
             out["higher_edu_share"] = pd.NA
 
-    # 4) 老龄化系数
-    young_col = get_first_existing_column(df, ["age_0_14_share", "0-14岁占比", "0-14岁占总人口比"])
-    age65_col = get_first_existing_column(df, ["age_65_plus_share", "65岁及以上占比"])
-    age60_col = get_first_existing_column(df, ["age_60_plus_share", "60岁及以上占比"])
+    young_col = get_first_existing_column(df, ["age_0_14_share"])
+    age65_col = get_first_existing_column(df, ["age_65_plus_share"])
+    age60_col = get_first_existing_column(df, ["age_60_plus_share"])
 
     out["age_0_14_share"] = pd.to_numeric(df[young_col], errors="coerce") if young_col else pd.NA
     out["age_65_plus_share"] = pd.to_numeric(df[age65_col], errors="coerce") if age65_col else pd.NA
     out["age_60_plus_share"] = pd.to_numeric(df[age60_col], errors="coerce") if age60_col else pd.NA
 
-    old_share = out["age_65_plus_share"].copy()
-    old_share = old_share.where(old_share.notna(), out["age_60_plus_share"])
-
-    # 1990 年如果缺失 65+，允许使用 60+ 近似
+    old_share = out["age_65_plus_share"].where(out["age_65_plus_share"].notna(), out["age_60_plus_share"])
     use_60_for_1990 = (
-        (out["year"] == 1990)
+        (out["census_year"] == 1990)
         & out["age_65_plus_share"].isna()
         & out["age_60_plus_share"].notna()
     )
     if use_60_for_1990.any():
-        print("说明：1990年部分样本缺少65岁及以上占比，已使用60岁及以上占比近似计算老龄化系数。")
+        print("说明：1990年如果缺少65岁及以上占比，已使用60岁及以上占比近似计算老龄化系数。")
 
     young = out["age_0_14_share"].replace(0, pd.NA)
     out["aging_coeff"] = old_share / young
 
-    # 5) 净迁移率
-    col = get_first_existing_column(df, ["net_interprovincial_inflow_rate", "net_migration_rate", "省际净迁入率", "净迁移率"])
+    col = get_first_existing_column(df, ["net_interprovincial_inflow_rate", "net_migration_rate", "净迁移率"])
     if col:
         out["net_migration_rate"] = df[col]
     else:
-        inflow_col = get_first_existing_column(df, ["interprovincial_inflow_share", "跨省迁入占总人口比例", "跨省流入占总人口比"])
-        outflow_col = get_first_existing_column(df, ["interprovincial_outflow_share", "跨省迁出占总人口比例", "跨省流出占总人口比"])
+        inflow_col = get_first_existing_column(df, ["interprovincial_inflow_share"])
+        outflow_col = get_first_existing_column(df, ["interprovincial_outflow_share"])
         if inflow_col and outflow_col:
             out["net_migration_rate"] = pd.to_numeric(df[inflow_col], errors="coerce") - pd.to_numeric(df[outflow_col], errors="coerce")
         else:
             out["net_migration_rate"] = pd.NA
 
-    # 6) 文盲率
     col = get_first_existing_column(df, ["illiteracy_rate", "文盲率", "文盲人口占15岁及以上人口比", "文盲人口占15岁及以上人口比重(%)"])
     out["illiteracy_rate"] = df[col] if col else pd.NA
 
-    # 比例字段归一化
     for ratio_col in [
         "urbanization_rate",
         "higher_edu_share",
@@ -177,12 +171,16 @@ def build_feature_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     ]:
         out[ratio_col] = normalize_ratio(out[ratio_col])
 
+    print("成功识别的基础字段：")
+    print(f"census_year <- {year_col}")
+    print(f"region <- {region_col if region_col else '未识别'}")
+    print(f"region_type <- {region_type_col if region_type_col else '未识别'}")
+
     return out
 
 
 def plot_feature_histograms(feature_df: pd.DataFrame, output_path: str) -> None:
     fig, axes = plt.subplots(2, 3, figsize=(15, 8), dpi=300)
-
     plot_map = [
         ("total_population", "总人口"),
         ("urbanization_rate", "城镇化率"),
@@ -203,22 +201,10 @@ def plot_feature_histograms(feature_df: pd.DataFrame, output_path: str) -> None:
             ax.grid(axis="y", alpha=0.15)
             sns.despine(ax=ax)
             continue
-
-        sns.histplot(
-            values,
-            bins=18,
-            kde=True,
-            color="#9EC3E6",
-            edgecolor="black",
-            linewidth=0.8,
-            alpha=0.75,
-            ax=ax,
-        )
-
+        sns.histplot(values, bins=18, kde=True, color="#9EC3E6", edgecolor="black", linewidth=0.8, alpha=0.75, ax=ax)
         if ax.lines:
             ax.lines[-1].set_color("#0072BC")
             ax.lines[-1].set_linewidth(1.6)
-
         ax.set_title(cname)
         ax.set_xlabel(cname)
         ax.set_ylabel("Count")
@@ -226,13 +212,7 @@ def plot_feature_histograms(feature_df: pd.DataFrame, output_path: str) -> None:
         sns.despine(ax=ax, top=True, right=True)
 
     fig.suptitle("四次人口普查关键特征分布直方图", fontsize=18, fontweight="bold", y=0.99)
-    fig.text(
-        0.5,
-        0.955,
-        "基于四普（1990）、五普（2000）、六普（2010）、七普（2020）省级样本",
-        ha="center",
-        fontsize=12,
-    )
+    fig.text(0.5, 0.955, "基于四普（1990）、五普（2000）、六普（2010）、七普（2020）省级样本", ha="center", fontsize=12)
     fig.subplots_adjust(top=0.86, wspace=0.28, hspace=0.34)
 
     output = Path(output_path)
@@ -247,11 +227,9 @@ def main() -> None:
     parser.add_argument("--file", default="人口普查数据_格式修正版.xlsx")
     parser.add_argument("--sheet", default="可视化主表")
     parser.add_argument("--output", default="outputs/census_feature_distribution_hist.png")
-    parser.add_argument("--include-national", action="store_true", default=False)
     args = parser.parse_args()
 
     setup_chinese_font()
-
     input_file = resolve_file_path(args.file)
     print(f"当前读取文件：{input_file.as_posix()}")
     print(f"当前读取工作表：{args.sheet}")
@@ -261,30 +239,19 @@ def main() -> None:
 
     feature_df = build_feature_dataframe(df)
 
-    # 样本筛选
-    filtered = feature_df[feature_df["year"].isin([1990, 2000, 2010, 2020])].copy()
-
-    if not args.include_national:
-        excluded_names = {"全国", "合计", "大陆合计"}
-        filtered = filtered[~filtered["region_name"].isin(excluded_names)]
-
-    if "region_type" in filtered.columns and (filtered["region_type"].astype(str).str.len() > 0).any():
+    filtered = feature_df[feature_df["census_year"].isin([1990, 2000, 2010, 2020])].copy()
+    if "region_type" in filtered.columns:
         filtered = filtered[filtered["region_type"] == "province"]
+    else:
+        filtered = filtered[~filtered["region"].isin({"全国", "合计", "大陆合计"})]
+
+    print("成功生成的指标：")
+    for c in ["total_population", "urbanization_rate", "higher_edu_share", "aging_coeff", "net_migration_rate", "illiteracy_rate"]:
+        print(c)
 
     print("各年份样本量：")
     for y in [1990, 2000, 2010, 2020]:
-        print(f"{y}: {int((filtered['year'] == y).sum())}")
-
-    print("成功生成的指标：")
-    for c in [
-        "total_population",
-        "urbanization_rate",
-        "higher_edu_share",
-        "aging_coeff",
-        "net_migration_rate",
-        "illiteracy_rate",
-    ]:
-        print(c)
+        print(f"{y}: {int((filtered['census_year'] == y).sum())}")
 
     print("各指标非空样本量：")
     name_map = {
