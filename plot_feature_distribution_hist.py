@@ -182,7 +182,7 @@ def build_feature_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 def plot_feature_histograms(feature_df: pd.DataFrame, output_path: str) -> None:
     fig, axes = plt.subplots(2, 3, figsize=(15, 8), dpi=300)
     plot_map = [
-        ("total_population", "总人口"),
+        ("total_population_wan", "总人口（万人）"),
         ("urbanization_rate", "城镇化率"),
         ("higher_edu_share", "高等教育占比"),
         ("aging_coeff", "老龄化系数"),
@@ -191,13 +191,17 @@ def plot_feature_histograms(feature_df: pd.DataFrame, output_path: str) -> None:
     ]
 
     for ax, (col, cname) in zip(axes.flatten(), plot_map):
-        values = pd.to_numeric(feature_df[col], errors="coerce").dropna()
+        if col == "total_population_wan":
+            total_population = pd.to_numeric(feature_df["total_population"], errors="coerce")
+            values = (total_population / 10000).dropna()
+        else:
+            values = pd.to_numeric(feature_df[col], errors="coerce").dropna()
         if values.empty:
             print(f"warning: 指标 {col} 无法生成有效数据，将在子图显示“数据缺失”。")
             ax.text(0.5, 0.5, "数据缺失", ha="center", va="center", fontsize=13)
             ax.set_title(cname)
             ax.set_xlabel(cname)
-            ax.set_ylabel("频数")
+            ax.set_ylabel("样本频数")
             ax.grid(axis="y", alpha=0.15)
             sns.despine(ax=ax)
             continue
@@ -207,7 +211,7 @@ def plot_feature_histograms(feature_df: pd.DataFrame, output_path: str) -> None:
             ax.lines[-1].set_linewidth(1.6)
         ax.set_title(cname)
         ax.set_xlabel(cname)
-        ax.set_ylabel("频数")
+        ax.set_ylabel("样本频数")
         ax.grid(axis="y", alpha=0.15)
         sns.despine(ax=ax, top=True, right=True)
 
