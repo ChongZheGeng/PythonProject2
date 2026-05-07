@@ -3,8 +3,10 @@ import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 from matplotlib import font_manager
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
 
 UNIT_LABELS = {
@@ -119,8 +121,8 @@ def prepare_plot_data(df: pd.DataFrame, indicator: str, unit: str) -> pd.DataFra
     return data
 
 
-def plot_household_bar(df: pd.DataFrame, region: str, indicator: str, unit: str, output_path: str) -> None:
-    """绘制家庭户数柱状图。"""
+def plot_household_bar_3d(df: pd.DataFrame, region: str, indicator: str, unit: str, output_path: str) -> None:
+    """绘制家庭户数三维立体柱状图。"""
     available_fonts = {f.name for f in font_manager.fontManager.ttflist}
     if "Microsoft YaHei" in available_fonts:
         plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Arial Unicode MS", "DejaVu Sans"]
@@ -134,14 +136,28 @@ def plot_household_bar(df: pd.DataFrame, region: str, indicator: str, unit: str,
     years = df["census_year"].tolist()
     values = df["plot_value"].tolist()
 
-    fig, ax = plt.subplots(figsize=(9, 6), dpi=300)
-    bars = ax.bar(
-        years,
-        values,
+    fig = plt.figure(figsize=(10, 7), dpi=300)
+    ax = fig.add_subplot(111, projection="3d")
+
+    x = np.arange(len(years))
+    y = np.zeros(len(years))
+    z = np.zeros(len(years))
+    dx = np.full(len(years), 0.45)
+    dy = np.full(len(years), 0.45)
+    dz = np.array(values, dtype=float)
+
+    ax.bar3d(
+        x,
+        y,
+        z,
+        dx,
+        dy,
+        dz,
         color="#4C78A8",
-        edgecolor="#2F4B6C",
-        linewidth=1.0,
-        width=6,
+        edgecolor="#2F4F6F",
+        linewidth=0.8,
+        alpha=0.9,
+        shade=True,
     )
 
     if region == "全国" and indicator == "family_households":
@@ -151,25 +167,30 @@ def plot_household_bar(df: pd.DataFrame, region: str, indicator: str, unit: str,
 
     ax.set_title(title, fontsize=16, fontweight="bold")
     ax.set_xlabel("普查年份", fontsize=12)
-    ax.set_ylabel(f"{indicator_label}（{unit_label}）", fontsize=12)
+    ax.set_ylabel("")
+    ax.set_zlabel(f"{indicator_label}（{unit_label}）", fontsize=12)
 
-    ax.set_xticks(years)
+    ax.set_xticks(x + dx / 2)
     ax.set_xticklabels([f"{year}年" for year in years], fontsize=10)
-    ax.tick_params(axis="y", labelsize=10)
+    ax.set_yticks([])
+    ax.tick_params(axis="z", labelsize=10)
 
-    ax.grid(axis="y", linestyle="--", color="#D9D9D9", linewidth=0.8, alpha=0.8)
+    ax.grid(True, axis="z", linestyle="--", color="#D9D9D9", linewidth=0.8, alpha=0.8)
     ax.set_axisbelow(True)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
+    ax.xaxis.pane.set_facecolor((1.0, 1.0, 1.0, 1.0))
+    ax.yaxis.pane.set_facecolor((1.0, 1.0, 1.0, 1.0))
+    ax.zaxis.pane.set_facecolor((1.0, 1.0, 1.0, 1.0))
+    ax.view_init(elev=22, azim=-55)
 
     max_val = max(values)
-    upper = max_val * 1.15 if max_val > 0 else 1
-    ax.set_ylim(0, upper)
+    upper = max_val * 1.15 if max_val > 0 else 1.0
+    ax.set_zlim(0, upper)
 
-    offset = max_val * 0.02 if max_val > 0 else 0.1
-    for bar, val in zip(bars, values):
+    offset = max_val * 0.015 if max_val > 0 else 0.1
+    for i, val in enumerate(values):
         ax.text(
-            bar.get_x() + bar.get_width() / 2,
+            x[i] + dx[i] / 2,
+            y[i] + dy[i] / 2,
             val + offset,
             f"{val:.1f}",
             ha="center",
@@ -183,7 +204,7 @@ def plot_household_bar(df: pd.DataFrame, region: str, indicator: str, unit: str,
     plt.savefig(out, bbox_inches="tight")
     plt.close(fig)
 
-    print(f"已保存家庭户数柱状图：{output_path}")
+    print(f"已保存三维家庭户数柱状图：{output_path}")
 
 
 def main() -> None:
@@ -193,7 +214,7 @@ def main() -> None:
     parser.add_argument("--region", default="全国", help="地区简称（region_short）")
     parser.add_argument("--indicator", default="family_households", help="指标字段名")
     parser.add_argument("--unit", default="wanhu", choices=["wanhu", "raw"], help="单位：wanhu 或 raw")
-    parser.add_argument("--output", default="outputs/household_bar_全国_family_households.png", help="输出图片路径")
+    parser.add_argument("--output", default="outputs/household_bar_3d_全国_family_households.png", help="输出图片路径")
 
     args = parser.parse_args()
 
@@ -210,7 +231,7 @@ def main() -> None:
     df = load_household_data(args.file, args.sheet)
     filtered = filter_household_data(df, args.region, args.indicator)
     plot_df = prepare_plot_data(filtered, args.indicator, args.unit)
-    plot_household_bar(plot_df, args.region, args.indicator, args.unit, args.output)
+    plot_household_bar_3d(plot_df, args.region, args.indicator, args.unit, args.output)
 
 
 if __name__ == "__main__":
