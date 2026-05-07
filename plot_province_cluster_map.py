@@ -5,9 +5,10 @@
     pip install pandas openpyxl pyecharts snapshot-selenium selenium
 
 说明：
-1) 本脚本默认读取文件：/mnt/data/省份聚类结果_K4.xlsx
-2) 使用 pyecharts 绘制中国省级行政区地图，并导出为高分辨率 PNG（300 dpi）
-3) 若运行 snapshot-selenium 时报错，请检查本机是否已安装 Chrome/Chromium 与对应版本 chromedriver
+1) 本脚本读取文件名：省份聚类结果_K4.xlsx
+2) 自动按多个本地路径顺序查找输入文件（优先脚本同级目录）
+3) 使用 pyecharts 绘制中国省级行政区地图，并导出为高分辨率 PNG（300 dpi）
+4) 若运行 snapshot-selenium 时报错，请检查本机是否已安装 Chrome/Chromium 与对应版本 chromedriver
 """
 
 from __future__ import annotations
@@ -26,9 +27,10 @@ from snapshot_selenium import snapshot
 # =========================
 # 基本配置
 # =========================
-INPUT_EXCEL = Path("/mnt/data/省份聚类结果_K4.xlsx")
-OUTPUT_PNG = Path("图3-1_省份聚类类型空间分布图.png")
-TEMP_HTML = Path("_tmp_cluster_map.html")
+INPUT_FILENAME = "省份聚类结果_K4.xlsx"
+BASE_DIR = Path(__file__).resolve().parent
+OUTPUT_PNG = BASE_DIR / "图3-1_省份聚类类型空间分布图.png"
+TEMP_HTML = BASE_DIR / "_tmp_cluster_map.html"
 
 TITLE = "图3-1 省份聚类类型空间分布图"
 SUBTITLE = "（按省级行政区聚类结果着色）"
@@ -48,6 +50,35 @@ CATEGORY_COLORS: Dict[int, str] = {
     3: "#E15759",  # 红
     4: "#9C755F",  # 褐
 }
+
+
+# =========================
+# 路径查找
+# =========================
+def find_input_excel() -> Tuple[Path, List[Path]]:
+    """按优先顺序查找输入 Excel 文件。"""
+    candidates = [
+        BASE_DIR / INPUT_FILENAME,
+        Path.cwd() / INPUT_FILENAME,
+        Path("D:/PythonProject2/省份聚类结果_K4.xlsx"),
+        Path("D:/PythonProject2/data/省份聚类结果_K4.xlsx"),
+    ]
+
+    for p in candidates:
+        if p.exists() and p.is_file():
+            return p, candidates
+
+    msg_lines = [
+        f"未找到输入文件：{INPUT_FILENAME}",
+        f"当前工作目录：{Path.cwd()}",
+        f"脚本所在目录：{BASE_DIR}",
+        "已尝试以下路径：",
+    ]
+    for idx, p in enumerate(candidates, start=1):
+        msg_lines.append(f"{idx}. {p}")
+    msg_lines.append("请将 Excel 文件放到 plot_province_cluster_map.py 同级目录，或手动修改 INPUT_EXCEL。")
+
+    raise FileNotFoundError("\n".join(msg_lines))
 
 
 # =========================
@@ -150,10 +181,10 @@ def detect_columns(df: pd.DataFrame) -> Tuple[str, str]:
 
 
 def main() -> None:
-    if not INPUT_EXCEL.exists():
-        raise FileNotFoundError(f"未找到输入文件：{INPUT_EXCEL}")
+    input_excel, attempted_paths = find_input_excel()
+    print(f"使用输入文件：{input_excel.resolve()}")
 
-    df = pd.read_excel(INPUT_EXCEL)
+    df = pd.read_excel(input_excel)
     if df.empty:
         raise ValueError("Excel 文件为空，无法绘图。")
 
@@ -189,14 +220,13 @@ def main() -> None:
     if not rows:
         raise ValueError("清洗后无有效数据，请检查输入表格。")
 
-    clean_df = pd.DataFrame(rows, columns=["省份", "类别"]) \
-        .drop_duplicates(subset=["省份"], keep="last")
+    clean_df = pd.DataFrame(rows, columns=["省份", "类别"]).drop_duplicates(subset=["省份"], keep="last")
 
     # 全部省级行政区（pyecharts 名称体系）
     all_regions = [
         "北京", "天津", "上海", "重庆", "河北", "河南", "云南", "辽宁", "黑龙江", "湖南", "安徽", "山东",
         "新疆", "江苏", "浙江", "江西", "湖北", "广西", "甘肃", "山西", "内蒙古", "陕西", "吉林", "福建",
-        "贵州", "广东", "青海", "西藏", "四川", "宁夏", "海南", "台湾", "香港", "澳门"
+        "贵州", "广东", "青海", "西藏", "四川", "宁夏", "海南", "台湾", "香港", "澳门",
     ]
 
     clean_map = dict(zip(clean_df["省份"], clean_df["类别"]))
