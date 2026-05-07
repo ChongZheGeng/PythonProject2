@@ -109,28 +109,59 @@ def _to_wide_from_long(df: pd.DataFrame) -> pd.DataFrame:
     return wide
 
 
+def _format_data_structure_help(sheet_names: List[str], sheet_columns: List[str]) -> str:
+    return (
+        f"{ERROR_MSG_MISSING_PYRAMID}\n"
+        f"当前 Excel 工作表：{', '.join(sheet_names) if sheet_names else '（无）'}\n"
+        f"当前读取工作表字段：{', '.join(sheet_columns) if sheet_columns else '（无）'}\n"
+        "期望数据格式示例：\n"
+        "census_year | region_short | age_group | male_pop | female_pop\n"
+        "2020        | 全国          | 0岁       | ...      | ...\n"
+        "2020        | 全国          | 1-4岁     | ...      | ..."
+    )
+
+
+def resolve_input_file(file_path: str) -> str:
+    """优先使用当前路径，若不存在则尝试脚本目录。"""
+    if os.path.exists(file_path):
+        return file_path
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidate = os.path.join(script_dir, file_path)
+    if os.path.exists(candidate):
+        return candidate
+
+    raise FileNotFoundError(
+        "未找到 Excel 文件，请确认文件是否放在项目根目录，或使用 --file 指定完整路径。"
+    )
+
+
 def load_pyramid_data(file_path: str) -> pd.DataFrame:
     """读取金字塔数据，优先从指定 sheet 读取并兼容宽表/长表。"""
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"文件不存在：{file_path}")
+    resolved_file = resolve_input_file(file_path)
 
     try:
-        excel = pd.ExcelFile(file_path)
+        excel = pd.ExcelFile(resolved_file)
     except Exception as exc:
         raise ValueError(f"Excel 文件读取失败：{exc}") from exc
 
-    target_sheet = next((s for s in TARGET_SHEETS if s in excel.sheet_names), None)
+    sheet_names = excel.sheet_names
+    target_sheet = next((s for s in TARGET_SHEETS if s in sheet_names), None)
     if target_sheet is None:
-        raise ValueError(ERROR_MSG_MISSING_PYRAMID)
+        raise ValueError(_format_data_structure_help(sheet_names, []))
 
-    df = pd.read_excel(file_path, sheet_name=target_sheet)
+    df = pd.read_excel(resolved_file, sheet_name=target_sheet)
+    raw_columns = [str(col) for col in df.columns]
     df = normalize_columns(df)
 
     wide_required = {"census_year", "region_short", "age_group", "male_pop", "female_pop"}
     if wide_required.issubset(df.columns):
         out = df[list(wide_required)].copy()
     else:
-        out = _to_wide_from_long(df)
+        try:
+            out = _to_wide_from_long(df)
+        except ValueError as exc:
+            raise ValueError(_format_data_structure_help(sheet_names, raw_columns)) from exc
 
     for col in ["male_pop", "female_pop"]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
@@ -202,22 +233,36 @@ def plot_population_pyramid(df: pd.DataFrame, year: int, region: str, unit: str,
 def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="根据 Excel 数据绘制人口金字塔图")
     parser.add_argument("--file", default="人口普查数据_格式修正版.xlsx", help="Excel 文件路径")
-    parser.add_argument("--year", type=int, required=True, help="普查年份，例如 2020")
-    parser.add_argument("--region", required=True, help="地区简称，例如 全国")
+    parser.add_argument("--year", type=int, default=2020, help="普查年份，例如 2020")
+    parser.add_argument("--region", default="全国", help="地区简称，例如 全国")
     parser.add_argument("--unit", choices=["raw", "wan"], default="wan", help="人数单位")
-    parser.add_argument("--output", required=True, help="输出图片路径")
+    parser.add_argument("--output", default=None, help="输出图片路径")
     return parser.parse_args(argv)
+
+
+def _resolve_output_path(args: argparse.Namespace) -> str:
+    if args.output:
+        return args.output
+    return os.path.join("outputs", f"population_pyramid_{args.year}_{args.region}.png")
 
 
 def main() -> None:
     args = parse_args(sys.argv[1:])
+    output_path = _resolve_output_path(args)
+
+    print("当前绘图参数：")
+    print(f"文件：{args.file}")
+    print(f"年份：{args.year}")
+    print(f"地区：{args.region}")
+    print(f"单位：{'万人' if args.unit == 'wan' else '原始人数'}")
+    print(f"输出路径：{output_path}")
 
     try:
         data = load_pyramid_data(args.file)
         filtered = filter_pyramid_data(data, args.year, args.region)
         plot_data = prepare_plot_data(filtered, args.unit)
-        plot_population_pyramid(plot_data, args.year, args.region, args.unit, args.output)
-        print(f"已保存人口金字塔图：{args.output}")
+        plot_population_pyramid(plot_data, args.year, args.region, args.unit, output_path)
+        print(f"已保存人口金字塔图：{output_path}")
     except Exception as exc:
         print(f"错误：{exc}")
         sys.exit(1)
