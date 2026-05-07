@@ -197,7 +197,7 @@ def plot_feature_histograms(feature_df: pd.DataFrame, output_path: str) -> None:
             ax.text(0.5, 0.5, "数据缺失", ha="center", va="center", fontsize=13)
             ax.set_title(cname)
             ax.set_xlabel(cname)
-            ax.set_ylabel("Count")
+            ax.set_ylabel("频数")
             ax.grid(axis="y", alpha=0.15)
             sns.despine(ax=ax)
             continue
@@ -207,7 +207,7 @@ def plot_feature_histograms(feature_df: pd.DataFrame, output_path: str) -> None:
             ax.lines[-1].set_linewidth(1.6)
         ax.set_title(cname)
         ax.set_xlabel(cname)
-        ax.set_ylabel("Count")
+        ax.set_ylabel("频数")
         ax.grid(axis="y", alpha=0.15)
         sns.despine(ax=ax, top=True, right=True)
 
