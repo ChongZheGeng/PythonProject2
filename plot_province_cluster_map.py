@@ -1,14 +1,8 @@
 """
-绘制图3-1 省份聚类类型空间分布图
+绘制图3-1 省份聚类类型空间分布图（Geopandas + Matplotlib 静态版）
 
 依赖安装（按需）：
-    pip install pandas openpyxl pyecharts snapshot-selenium selenium
-
-说明：
-1) 本脚本读取文件名：省份聚类结果_K4.xlsx
-2) 自动按多个本地路径顺序查找输入文件（优先脚本同级目录）
-3) 使用 pyecharts 绘制中国省级行政区地图，并导出为高分辨率 PNG（300 dpi）
-4) 若运行 snapshot-selenium 时报错，请检查本机是否已安装 Chrome/Chromium 与对应版本 chromedriver
+    pip install pandas openpyxl geopandas matplotlib
 """
 
 from __future__ import annotations
@@ -17,15 +11,10 @@ import re
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import geopandas as gpd
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import pandas as pd
-from pyecharts import options as opts
-from pyecharts.charts import Map
-from pyecharts.globals import CurrentConfig
-from pyecharts.render import make_snapshot
-from snapshot_selenium import snapshot
-
-# 使用稳定可访问的 pyecharts 静态资源地址
-CurrentConfig.ONLINE_HOST = "https://assets.pyecharts.org/assets/v5/"
 
 
 # =========================
@@ -33,13 +22,10 @@ CurrentConfig.ONLINE_HOST = "https://assets.pyecharts.org/assets/v5/"
 # =========================
 INPUT_FILENAME = "省份聚类结果_K4.xlsx"
 BASE_DIR = Path(__file__).resolve().parent
-OUTPUT_HTML = BASE_DIR / "图3-1_省份聚类类型空间分布图.html"
 OUTPUT_PNG = BASE_DIR / "图3-1_省份聚类类型空间分布图.png"
 
 TITLE = "图3-1 省份聚类类型空间分布图"
-SUBTITLE = "（按省级行政区聚类结果着色）"
 
-# 类别映射：用于图例显示
 CATEGORY_LABELS: Dict[int, str] = {
     1: "类别1：都市型",
     2: "类别2：高活力/转型型",
@@ -47,13 +33,16 @@ CATEGORY_LABELS: Dict[int, str] = {
     4: "类别4：主体混合型",
 }
 
-# 论文风格配色（清晰但不过艳）
+# 论文风格：低饱和、清晰
 CATEGORY_COLORS: Dict[int, str] = {
-    1: "#4E79A7",  # 蓝
-    2: "#59A14F",  # 绿
-    3: "#E15759",  # 红
-    4: "#9C755F",  # 褐
+    1: "#4E79A7",
+    2: "#76A86B",
+    3: "#C86C6B",
+    4: "#9A8B7A",
 }
+
+DEFAULT_FILL = "#E6E6E6"  # 未赋类省份（如港澳台缺失时）
+EDGE_COLOR = "#666666"
 
 
 # =========================
@@ -80,8 +69,32 @@ def find_input_excel() -> Tuple[Path, List[Path]]:
     ]
     for idx, p in enumerate(candidates, start=1):
         msg_lines.append(f"{idx}. {p}")
-    msg_lines.append("请将 Excel 文件放到 plot_province_cluster_map.py 同级目录，或手动修改 INPUT_EXCEL。")
+    msg_lines.append("请将 Excel 文件放到脚本同级目录，或手动修改 INPUT_FILENAME。")
+    raise FileNotFoundError("\n".join(msg_lines))
 
+
+def find_china_boundary_file() -> Tuple[Path, List[Path]]:
+    """按要求优先顺序查找中国省级边界文件。"""
+    candidates = [
+        Path("D:/PythonProject2/china_provinces.geojson"),
+        Path("D:/PythonProject2/data/china_provinces.geojson"),
+        Path("D:/PythonProject2/china_provinces.shp"),
+        Path("D:/PythonProject2/data/china_provinces.shp"),
+    ]
+
+    for p in candidates:
+        if p.exists() and p.is_file():
+            return p, candidates
+
+    msg_lines = [
+        "未找到中国省级行政区边界文件（GeoJSON / Shapefile）。",
+        f"当前工作目录：{Path.cwd()}",
+        f"脚本所在目录：{BASE_DIR}",
+        "已尝试以下地图文件路径：",
+    ]
+    for idx, p in enumerate(candidates, start=1):
+        msg_lines.append(f"{idx}. {p}")
+    msg_lines.append("请下载并放入中国省级行政区 GeoJSON（推荐文件名 china_provinces.geojson）后重试。")
     raise FileNotFoundError("\n".join(msg_lines))
 
 
@@ -89,9 +102,9 @@ def find_input_excel() -> Tuple[Path, List[Path]]:
 # 名称标准化
 # =========================
 def normalize_province_name(raw_name: str) -> List[str]:
-    """将原始省份名称标准化为 pyecharts 中国地图常见名称。
+    """将原始省份名称标准化为统一名称。
 
-    返回 list，原因：
+    返回 list 的原因：
     - 常规情况返回单一省份；
     - 特殊情况“四川（含重庆）”会拆分为“四川”“重庆”。
     """
@@ -102,16 +115,28 @@ def normalize_province_name(raw_name: str) -> List[str]:
     if not name:
         return []
 
-    # 去除空格和常见全角空格
     name = re.sub(r"[\s\u3000]+", "", name)
 
-    # 特殊处理：四川（含重庆）
     if re.search(r"四川.*含.*重庆", name):
-        # 说明：第四次人口普查时期重庆尚未单列，
-        # 为保证当前省级空间分布图完整，视觉上将该记录同时赋给四川和重庆。
+        # 由于第四次人口普查时期重庆尚未单列，为保证空间分布图完整，
+        # 因此在可视化中将四川和重庆赋为同一类别。
         return ["四川", "重庆"]
 
-    # 常见后缀清理
+    direct_map = {
+        "北京市": "北京",
+        "天津市": "天津",
+        "上海市": "上海",
+        "重庆市": "重庆",
+        "河北省": "河北",
+        "内蒙古自治区": "内蒙古",
+        "广西壮族自治区": "广西",
+        "宁夏回族自治区": "宁夏",
+        "新疆维吾尔自治区": "新疆",
+        "西藏自治区": "西藏",
+    }
+    if name in direct_map:
+        return [direct_map[name]]
+
     name = (
         name.replace("省", "")
         .replace("市", "")
@@ -122,7 +147,6 @@ def normalize_province_name(raw_name: str) -> List[str]:
         .replace("自治区", "")
     )
 
-    # 常见别名统一
     alias_map = {
         "内蒙古": "内蒙古",
         "广西": "广西",
@@ -134,39 +158,29 @@ def normalize_province_name(raw_name: str) -> List[str]:
         "台湾": "台湾",
         "黑龙江": "黑龙江",
     }
-    name = alias_map.get(name, name)
-
-    return [name]
+    return [alias_map.get(name, name)]
 
 
 def detect_columns(df: pd.DataFrame) -> Tuple[str, str]:
     """自动识别“省份列”和“类别列”。"""
     col_names = list(df.columns)
-
     province_keywords = ["省", "市", "地区", "行政区", "province", "prov", "区域", "省份"]
     category_keywords = ["类", "类别", "cluster", "聚类", "type", "分组"]
 
     def score_column(col: str, keywords: List[str]) -> int:
         c = str(col).strip().lower()
-        score = 0
-        for kw in keywords:
-            if kw.lower() in c:
-                score += 2
-        return score
+        return sum(2 for kw in keywords if kw.lower() in c)
 
-    # 初步按列名打分
     province_scores = {c: score_column(c, province_keywords) for c in col_names}
     category_scores = {c: score_column(c, category_keywords) for c in col_names}
 
     province_col = max(province_scores, key=province_scores.get)
     category_col = max(category_scores, key=category_scores.get)
 
-    # 若打分都很弱，启发式基于内容判断
     if province_scores[province_col] == 0:
         province_col = col_names[0]
 
     if category_scores[category_col] == 0:
-        # 优先找取值在 1~4 的列
         best_col = None
         best_match = -1
         for c in col_names:
@@ -184,9 +198,33 @@ def detect_columns(df: pd.DataFrame) -> Tuple[str, str]:
     return province_col, category_col
 
 
+def detect_geo_province_column(gdf: gpd.GeoDataFrame) -> str:
+    """自动识别边界文件中的省名字段。"""
+    candidates = ["省份", "省", "NAME", "NAME_CHN", "name", "name_zh", "prov_name", "province"]
+    cols = list(gdf.columns)
+
+    for c in candidates:
+        if c in cols:
+            return c
+
+    for c in cols:
+        if "name" in str(c).lower() or "省" in str(c):
+            return c
+
+    raise ValueError(f"无法识别边界文件中的省份名称字段，当前字段为：{cols}")
+
+
+def configure_chinese_font() -> None:
+    plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Arial Unicode MS", "DejaVu Sans"]
+    plt.rcParams["axes.unicode_minus"] = False
+
+
 def main() -> None:
-    input_excel, _attempted_paths = find_input_excel()
+    input_excel, _ = find_input_excel()
     print(f"使用输入文件：{input_excel.resolve()}")
+
+    boundary_file, _ = find_china_boundary_file()
+    print(f"使用地图边界文件：{boundary_file.resolve()}")
 
     df = pd.read_excel(input_excel)
     if df.empty:
@@ -196,26 +234,22 @@ def main() -> None:
     print(f"识别到省份列：{province_col}")
     print(f"识别到类别列：{category_col}")
 
-    # 清洗并展开数据
     rows = []
     for _, row in df.iterrows():
-        raw_province = row[province_col]
-        raw_category = row[category_col]
-
-        provinces = normalize_province_name(raw_province)
+        provinces = normalize_province_name(row[province_col])
         if not provinces:
             continue
 
+        raw_category = row[category_col]
         cat = pd.to_numeric(pd.Series([raw_category]), errors="coerce").iloc[0]
         if pd.isna(cat):
-            # 尝试从字符串提取数字
             m = re.search(r"(\d+)", str(raw_category))
             if m:
                 cat = int(m.group(1))
-        cat = int(cat) if pd.notna(cat) else None
 
+        cat = int(cat) if pd.notna(cat) else None
         if cat not in {1, 2, 3, 4}:
-            print(f"[警告] 类别值异常，已跳过：省份={raw_province}, 类别={raw_category}")
+            print(f"[警告] 类别值异常，已跳过：省份={row[province_col]}, 类别={raw_category}")
             continue
 
         for p in provinces:
@@ -226,108 +260,44 @@ def main() -> None:
 
     clean_df = pd.DataFrame(rows, columns=["省份", "类别"]).drop_duplicates(subset=["省份"], keep="last")
 
-    # 全部省级行政区（pyecharts 名称体系）
-    all_regions = [
-        "北京", "天津", "上海", "重庆", "河北", "河南", "云南", "辽宁", "黑龙江", "湖南", "安徽", "山东",
-        "新疆", "江苏", "浙江", "江西", "湖北", "广西", "甘肃", "山西", "内蒙古", "陕西", "吉林", "福建",
-        "贵州", "广东", "青海", "西藏", "四川", "宁夏", "海南", "台湾", "香港", "澳门",
-    ]
+    gdf = gpd.read_file(boundary_file)
+    name_col = detect_geo_province_column(gdf)
+    gdf["省份标准化"] = gdf[name_col].apply(lambda x: normalize_province_name(x)[0] if normalize_province_name(x) else None)
 
-    clean_map = dict(zip(clean_df["省份"], clean_df["类别"]))
+    merged = gdf.merge(clean_df, left_on="省份标准化", right_on="省份", how="left")
+    merged["填充色"] = merged["类别"].map(CATEGORY_COLORS).fillna(DEFAULT_FILL)
 
-    # 打印匹配异常信息
-    input_only = sorted(set(clean_df["省份"]) - set(all_regions))
-    missing_in_input = sorted(set(all_regions) - set(clean_df["省份"]))
+    missing_special = [p for p in ["香港", "澳门", "台湾"] if p in set(merged["省份标准化"].dropna()) and p not in set(clean_df["省份"])]
+    if missing_special:
+        print(f"[提示] {missing_special} 在 Excel 中无类别，已使用浅灰色显示。")
 
-    if input_only:
-        print("[提示] 以下省份名称未能匹配到底图区域：", input_only)
-    if missing_in_input:
-        print("[提示] 以下省份在数据中缺失，将显示为默认底色：", missing_in_input)
+    configure_chinese_font()
+    fig, ax = plt.subplots(figsize=(10.5, 8.0))
 
-    data_pair = [(r, clean_map.get(r, None)) for r in all_regions]
-
-    pieces = [
-        {"min": 1, "max": 1, "label": CATEGORY_LABELS[1], "color": CATEGORY_COLORS[1]},
-        {"min": 2, "max": 2, "label": CATEGORY_LABELS[2], "color": CATEGORY_COLORS[2]},
-        {"min": 3, "max": 3, "label": CATEGORY_LABELS[3], "color": CATEGORY_COLORS[3]},
-        {"min": 4, "max": 4, "label": CATEGORY_LABELS[4], "color": CATEGORY_COLORS[4]},
-    ]
-
-    c = (
-        Map(init_opts=opts.InitOpts(width="1500px", height="1050px", bg_color="white"))
-        .add(
-            series_name="聚类类别",
-            data_pair=data_pair,
-            maptype="china",
-            is_map_symbol_show=False,
-            label_opts=opts.LabelOpts(
-                is_show=True,
-                font_size=11,
-                font_family="Microsoft YaHei",
-                color="#222222",
-            ),
-        )
-        .set_global_opts(
-            title_opts=opts.TitleOpts(
-                title=TITLE,
-                subtitle=SUBTITLE,
-                pos_left="center",
-                title_textstyle_opts=opts.TextStyleOpts(
-                    font_family="Microsoft YaHei",
-                    font_size=26,
-                    font_weight="bold",
-                    color="#111111",
-                ),
-                subtitle_textstyle_opts=opts.TextStyleOpts(
-                    font_family="Microsoft YaHei",
-                    font_size=14,
-                    color="#444444",
-                ),
-            ),
-            legend_opts=opts.LegendOpts(is_show=False),
-            visualmap_opts=opts.VisualMapOpts(
-                is_piecewise=True,
-                pieces=pieces,
-                pos_left="3%",
-                pos_top="20%",
-                item_width=30,
-                item_height=18,
-                textstyle_opts=opts.TextStyleOpts(
-                    font_family="Microsoft YaHei",
-                    font_size=14,
-                    color="#222222",
-                ),
-            ),
-        )
-        .set_series_opts(
-            itemstyle_opts=opts.ItemStyleOpts(
-                border_color="#666666",
-                border_width=0.9,
-                area_color="#F4F4F4",
-            )
-        )
+    merged.plot(
+        ax=ax,
+        color=merged["填充色"],
+        edgecolor=EDGE_COLOR,
+        linewidth=0.8,
     )
 
-    # 始终先输出 HTML，保证至少可交付可视化结果
-    html_path = c.render(str(OUTPUT_HTML))
-    print(f"HTML 文件已保存：{OUTPUT_HTML.resolve()}")
+    ax.set_title(TITLE, fontsize=16, fontweight="bold", pad=12)
+    ax.set_axis_off()
 
-    # 导出高分辨率 PNG：增加延迟，避免 ECharts JS 尚未加载完成
-    try:
-        make_snapshot(
-            snapshot,
-            html_path,
-            str(OUTPUT_PNG),
-            is_remove_html=False,
-            pixel_ratio=3,
-            delay=5,
-        )
-        print(f"PNG 图片已保存：{OUTPUT_PNG.resolve()}")
-    except Exception as e:
-        print("PNG 导出失败，原因可能是 ECharts JS 文件未加载成功。")
-        print(f"错误信息：{e}")
-        print(f"已保留 HTML 文件：{OUTPUT_HTML.resolve()}")
-        print("请用浏览器打开该 HTML 文件后手动截图，或检查网络是否能访问 https://assets.pyecharts.org/assets/v5/")
+    legend_elements = [
+        Line2D([0], [0], marker="s", color="w", label=CATEGORY_LABELS[k], markerfacecolor=v, markersize=10)
+        for k, v in CATEGORY_COLORS.items()
+    ]
+    legend_elements.append(
+        Line2D([0], [0], marker="s", color="w", label="未分类/缺失（港澳台等）", markerfacecolor=DEFAULT_FILL, markersize=10)
+    )
+    ax.legend(handles=legend_elements, loc="lower left", frameon=True, framealpha=0.95, fontsize=10)
+
+    plt.tight_layout()
+    fig.savefig(OUTPUT_PNG, dpi=300, facecolor="white")
+    plt.close(fig)
+
+    print(f"PNG 图片已保存：{OUTPUT_PNG.resolve()}")
 
 
 if __name__ == "__main__":
